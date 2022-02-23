@@ -1,76 +1,115 @@
 package main
 
 import (
-	"log"
 	"os"
 	"path"
-	"strings"
+	"path/filepath"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
+	"github.com/rjeczalik/notify"
 )
 
-func handleFile(eventName string, NFS_PATH string) {
-	fileInfo, err := os.Stat(eventName)
+// Notify events have absolute paths. We want to normalize these so that they
+// are relative to the base path.
+func normPath(base string, abspath string) (string, error) {
+	absbase, err := filepath.Abs(base)
 	if err != nil {
-		panic("Couldn't determine the type of your file/folder")
+		return "", err
 	}
-	var outputPath = NFS_PATH + "/" + path.Base(eventName)
-	if !fileInfo.IsDir() {
-		dirErr := os.MkdirAll(path.Dir(outputPath), os.ModePerm)
-		if dirErr != nil {
-			log.Panic(dirErr)
-		}
+	relpath, err := filepath.Rel(absbase, abspath)
+	if err != nil {
+		return "", err
 	}
+	return filepath.Join(base, relpath), nil
+}
 
-	renameError := os.Rename(eventName, outputPath)
-	if renameError != nil {
-		panic(err)
+// An existenceChecker checks the existence of a file
+type existenceChecker interface {
+	Check(p string) bool
+}
+
+type statChecker struct{}
+
+func (sc statChecker) Check(p string) bool {
+	_, err := os.Stat(p)
+	if err == nil {
+		return true
+	}
+	return false
+}
+
+// This function batches events up, and emits just a list of paths for files
+// considered changed. It applies some heuristics to deal with short-lived
+// temporary files.
+//
+// - Events can arrive out of order - i.e. we can get a removal event first
+// then a creation event for a transient file.
+// - Events seem to be unreliable on some platforms - i.e. we might get a
+// removal event but never see a creation event.
+func batch(batchTime time.Duration, exists existenceChecker, ch chan notify.EventInfo) []string {
+	emap := make(map[string]bool)
+	for {
+		select {
+		case evt := <-ch:
+			emap[evt.Path()] = true
+		case <-time.After(batchTime):
+			var ret []string
+			for k := range emap {
+				if exists.Check(k) {
+					ret = append(ret, k)
+				}
+			}
+			return ret
+		}
 	}
 }
-func main() {
-	NFS_PATH := os.Getenv("NFS_PATH")
-	TARGET_PATH := os.Getenv("TARGET_PATH")
-	watcher, err := fsnotify.NewWatcher()
+
+// Watch watches a path p, batching events with duration batchTime. A list of
+// strings are written to chan, representing all files changed, added or
+// removed. We apply heuristics to cope with things like transient files and
+// unreliable event notifications.
+func Watch(p string, batchTime time.Duration, ch chan []string) error {
+	stat, err := os.Stat(p)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer watcher.Close()
-
-	done := make(chan bool)
-	go func() {
-		for {
-			select {
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
+	if stat.IsDir() {
+		p = path.Join(p, "...")
+	}
+	evtch := make(chan notify.EventInfo)
+	err = notify.Watch(p, evtch, notify.All)
+	if err == nil {
+		go func() {
+			for {
+				ret := batch(batchTime, statChecker{}, evtch)
+				if len(ret) > 0 {
+					for i := range ret {
+						norm, _ := normPath(p, ret[i])
+						ret[i] = norm
+					}
+					ch <- ret
 				}
-				log.Println("event:", event)
-				fileIsDownloading := strings.Contains(path.Ext(event.Name), ".crdownload")
-				if event.Op&fsnotify.Chmod == fsnotify.Chmod && !fileIsDownloading { // New File exists in the target folder By Host os means (copy/Create)
-
-					log.Println("Copy Finished", event.Name)
-					go handleFile(event.Name, NFS_PATH)
-				}
-				if event.Op&fsnotify.Rename == fsnotify.Rename && fileIsDownloading {
-					time.Sleep(time.Millisecond * 200)
-					log.Println("Download Finished", event.Name)
-					var postRenameFile = strings.Replace(event.Name, ".crdownload", "", -1)
-					go handleFile(postRenameFile, NFS_PATH)
-				}
-
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				log.Println("error:", err)
+			}
+		}()
+	}
+	return err
+}
+func main() {
+	var (
+		batchTime = time.Millisecond * 100
+		p         = "./test"
+	)
+	ch := make(chan []string)
+	err := Watch(p, batchTime, ch)
+	if err != nil {
+		panic(err)
+	}
+	for {
+		select {
+		case evts := <-ch:
+			for i := range evts {
+				println(evts[i])
 			}
 		}
-	}()
-
-	err = watcher.Add(TARGET_PATH)
-	if err != nil {
-		log.Fatal(err)
 	}
-	<-done
 }
