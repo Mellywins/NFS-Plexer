@@ -129,7 +129,7 @@ func main() {
 		select {
 		case evts := <-ch:
 			for i := range evts {
-				handleFile(evts[i], transferTo)
+				go handleFile(evts[i], transferTo)
 				println(evts[i])
 			}
 		}
