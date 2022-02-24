@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -8,6 +9,25 @@ import (
 
 	"github.com/rjeczalik/notify"
 )
+
+func handleFile(eventName string, NFS_PATH string) {
+	fileInfo, err := os.Stat(eventName)
+	if err != nil {
+		panic("Couldn't determine the type of your file/folder")
+	}
+	var outputPath = NFS_PATH + "/" + path.Base(eventName)
+	if !fileInfo.IsDir() {
+		dirErr := os.MkdirAll(path.Dir(outputPath), os.ModePerm)
+		if dirErr != nil {
+			log.Panic(dirErr)
+		}
+	}
+
+	renameError := os.Rename(eventName, outputPath)
+	if renameError != nil {
+		panic(err)
+	}
+}
 
 // Notify events have absolute paths. We want to normalize these so that they
 // are relative to the base path.
@@ -95,12 +115,13 @@ func Watch(p string, batchTime time.Duration, ch chan []string) error {
 	return err
 }
 func main() {
+	pathToWatch := os.Getenv("PATH_TO_WATCH")
+	transferTo := os.Getenv("TRANSFER_TO")
 	var (
 		batchTime = time.Millisecond * 100
-		p         = "./test"
 	)
 	ch := make(chan []string)
-	err := Watch(p, batchTime, ch)
+	err := Watch(pathToWatch, batchTime, ch)
 	if err != nil {
 		panic(err)
 	}
@@ -108,6 +129,7 @@ func main() {
 		select {
 		case evts := <-ch:
 			for i := range evts {
+				handleFile(evts[i], transferTo)
 				println(evts[i])
 			}
 		}
